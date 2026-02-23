@@ -1,99 +1,230 @@
 package com.lutcam.app.camera
 
-import android.content.Context
-import android.hardware.camera2.CameraCharacteristics
+import android.annotation.SuppressLint
 import android.hardware.camera2.CaptureRequest
+import android.view.MotionEvent
 import androidx.camera.camera2.interop.Camera2Interop
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.Preview
+import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import java.util.concurrent.Executor
+import kotlinx.coroutines.delay
 
+@SuppressLint("ClickableViewAccessibility")
 @Composable
 fun CameraScreen() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    val cameraExecutor = ContextCompat.getMainExecutor(context)
+    val cameraExecutor = remember { ContextCompat.getMainExecutor(context) }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+
+    // UI 互動狀態
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var isFocusUIVisible by remember { mutableStateOf(false) }
+    var exposureIndex by remember { mutableFloatStateOf(0f) }
+    var exposureRange by remember { mutableStateOf(0f..0f) }
+
+    // 觸控 3 秒後自動隱藏對焦與亮度介面
+    LaunchedEffect(isFocusUIVisible, exposureIndex) {
+        if (isFocusUIVisible) {
+            delay(3000)
+            isFocusUIVisible = false
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        // === 1. 相機底層預覽與觸控對接 ===
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
-                val previewView = androidx.camera.view.PreviewView(ctx).apply {
-                    scaleType = androidx.camera.view.PreviewView.ScaleType.FILL_CENTER
+                PreviewView(ctx).apply {
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    previewView = this
+
+                    setOnTouchListener { view, event ->
+                        if (event.action == MotionEvent.ACTION_DOWN) {
+                            // 攔截觸控座標，送給 CameraX 進行對焦與測光
+                            val factory = this.meteringPointFactory
+                            val point = factory.createPoint(event.x, event.y)
+                            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                                .build()
+                            
+                            camera?.cameraControl?.startFocusAndMetering(action)
+                            
+                            // 更新 UI 紀錄點
+                            focusPoint = Offset(event.x, event.y)
+                            isFocusUIVisible = true
+                            
+                            view.performClick()
+                            return@setOnTouchListener true
+                        }
+                        false
+                    }
                 }
+            },
+            update = {
+                if (camera == null) {
+                    cameraProviderFuture.addListener({
+                        val cameraProvider = cameraProviderFuture.get()
 
-                cameraProviderFuture.addListener({
-                    val cameraProvider = cameraProviderFuture.get()
+                        val preview = Preview.Builder().build().also {
+                            it.setSurfaceProvider(previewView?.surfaceProvider)
+                        }
 
-                    // 設定預覽
-                    val preview = Preview.Builder().build().also {
-                        it.setSurfaceProvider(previewView.surfaceProvider)
-                    }
+                        val imageCaptureBuilder = ImageCapture.Builder()
+                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
 
-                    // 設定 ImageCapture (拍照) - 我們在這裡介入 Camera2 底層 API
-                    val imageCaptureBuilder = ImageCapture.Builder()
-                        .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                        val ext = Camera2Interop.Extender(imageCaptureBuilder)
+                        ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
+                        ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+                        ext.setCaptureRequestOption(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
 
-                    // 核心：關閉廠商的最佳化 (Pixel 的強制 HDR、降噪、邊緣銳化)
-                    val ext = Camera2Interop.Extender(imageCaptureBuilder)
-                    ext.setCaptureRequestOption(
-                        CaptureRequest.NOISE_REDUCTION_MODE, 
-                        CaptureRequest.NOISE_REDUCTION_MODE_OFF
-                    )
-                    ext.setCaptureRequestOption(
-                        CaptureRequest.EDGE_MODE, 
-                        CaptureRequest.EDGE_MODE_OFF
-                    )
-                    ext.setCaptureRequestOption(
-                        CaptureRequest.TONEMAP_MODE, 
-                        CaptureRequest.TONEMAP_MODE_FAST
-                    )
-                    // 如果有光學防手震，可以預期保留，但我們關閉了軟體干預
+                        imageCapture = imageCaptureBuilder.build()
 
-                    val imageCapture = imageCaptureBuilder.build()
+                        try {
+                            val lutProcessor = com.lutcam.app.camera.lut.LutSurfaceProcessor(cameraExecutor)
+                            val lutEffect = com.lutcam.app.camera.lut.LutCameraEffect(lutProcessor)
 
-                    try {
-                        // 建立 LUT 特效管線處理器
-                        val lutProcessor = com.lutcam.app.camera.lut.LutSurfaceProcessor(cameraExecutor)
-                        val lutEffect = com.lutcam.app.camera.lut.LutCameraEffect(lutProcessor)
+                            val useCaseGroup = UseCaseGroup.Builder()
+                                .addUseCase(preview)
+                                .addUseCase(imageCapture!!)
+                                .addEffect(lutEffect)
+                                .build()
 
-                        // 將拍攝案例與特效組合成一個 UseCaseGroup
-                        val useCaseGroup = androidx.camera.core.UseCaseGroup.Builder()
-                            .addUseCase(preview)
-                            .addUseCase(imageCapture)
-                            .addEffect(lutEffect)
-                            .build()
+                            cameraProvider.unbindAll()
+                            camera = cameraProvider.bindToLifecycle(
+                                lifecycleOwner,
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                useCaseGroup
+                            )
+                            
+                            // 獲取硬體支援的極限曝光補償範圍
+                            camera?.cameraInfo?.exposureState?.let { exposureState ->
+                                val range = exposureState.exposureCompensationRange
+                                exposureRange = range.lower.toFloat()..range.upper.toFloat()
+                                exposureIndex = exposureState.exposureCompensationIndex.toFloat()
+                            }
 
-                        // 移除先前的綁定，並綁定完整包含濾鏡管線的 Lifecycle
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            useCaseGroup
-                        )
-                    } catch (exc: Exception) {
-                        // 處理相機綁定失敗
-                    }
-                }, cameraExecutor)
-
-                previewView
+                        } catch (exc: Exception) {
+                            exc.printStackTrace()
+                        }
+                    }, cameraExecutor)
+                }
             }
         )
+
+        // === 2. 極簡美學：對焦黃框與亮度滑桿覆蓋層 ===
+        AnimatedVisibility(
+            visible = isFocusUIVisible,
+            exit = fadeOut(animationSpec = tween(500)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            focusPoint?.let { point ->
+                val density = LocalDensity.current.density
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // 對焦環 (外框)
+                    Canvas(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .offset(
+                                x = (point.x / density).dp - 36.dp,
+                                y = (point.y / density).dp - 36.dp
+                            )
+                    ) {
+                        drawCircle(
+                            color = Color(0xFFFFCC00), // 沉穩黃金對焦色
+                            radius = size.minDimension / 2,
+                            style = Stroke(width = 2.dp.toPx())
+                        )
+                    }
+                    
+                    // 曝光補償滑桿 (直立顯示在對焦框右側)
+                    if (exposureRange.endInclusive > exposureRange.start) {
+                        Box(
+                            modifier = Modifier
+                                .offset(
+                                    x = (point.x / density).dp + 48.dp, // 放在右側 48dp 處
+                                    y = (point.y / density).dp - 60.dp  // 同等高度
+                                )
+                                .width(32.dp)
+                                .height(120.dp)
+                        ) {
+                            Slider(
+                                value = exposureIndex,
+                                onValueChange = { newVal ->
+                                    exposureIndex = newVal
+                                    camera?.cameraControl?.setExposureCompensationIndex(newVal.toInt())
+                                    isFocusUIVisible = true // 重置自動隱藏計時
+                                },
+                                valueRange = exposureRange,
+                                colors = SliderDefaults.colors(
+                                    thumbColor = Color(0xFFFFCC00),
+                                    activeTrackColor = Color(0xFFFFCC00),
+                                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                                ),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        // 原生的 Slider 是水平的，將他逆時針旋轉 90 度變成垂直，上推增加、下推變暗
+                                        rotationZ = -90f
+                                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0.5f)
+                                    }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // === 3. 底部選單控制區 ===
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                // 微弱的黑色漸層或半透明背景，突顯純淨感
+                .background(Color.Black.copy(alpha = 0.3f))
+                .padding(bottom = 48.dp, top = 24.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            // 快門大按鈕
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .border(4.dp, Color.White, CircleShape)
+                    .padding(4.dp) // 預留空間創造雙層圓環感
+                    .background(Color.White, CircleShape)
+                    .clickable {
+                        // TODO: 執行拍攝並儲存 JPEG
+                    }
+            )
+        }
     }
 }
