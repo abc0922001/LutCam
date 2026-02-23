@@ -222,7 +222,43 @@ fun CameraScreen() {
                     .padding(4.dp) // 預留空間創造雙層圓環感
                     .background(Color.White, CircleShape)
                     .clickable {
-                        // TODO: 執行拍攝並儲存 JPEG
+                        val captureOpt = imageCapture ?: return@clickable
+                        
+                        // 建立存檔的檔名與屬性
+                        val name = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                            .format(System.currentTimeMillis())
+                        
+                        val contentValues = android.content.ContentValues().apply {
+                            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "LutCam_$name.jpg")
+                            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                            if (android.os.Build.VERSION.SDK_INT > android.os.Build.VERSION_CODES.P) {
+                                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/LutCam")
+                            }
+                        }
+
+                        // 設定輸出至 MediaStore (相簿)
+                        val outputOptions = ImageCapture.OutputFileOptions
+                            .Builder(
+                                context.contentResolver,
+                                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                contentValues
+                            )
+                            .build()
+
+                        // 觸發拍照
+                        captureOpt.takePicture(
+                            outputOptions,
+                            cameraExecutor,
+                            object : ImageCapture.OnImageSavedCallback {
+                                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                                    android.widget.Toast.makeText(context, "照片已儲存至 LutCam 相簿", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+
+                                override fun onError(exc: ImageCaptureException) {
+                                    android.widget.Toast.makeText(context, "儲存失敗: ${exc.message}", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
                     }
             )
         }
