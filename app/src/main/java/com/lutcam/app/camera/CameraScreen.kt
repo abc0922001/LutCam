@@ -69,13 +69,23 @@ fun CameraScreen() {
                     val imageCapture = imageCaptureBuilder.build()
 
                     try {
-                        // 移除先前的綁定，並綁定 Lifecycle
+                        // 建立 LUT 特效管線處理器
+                        val lutProcessor = com.lutcam.app.camera.lut.LutSurfaceProcessor(cameraExecutor)
+                        val lutEffect = com.lutcam.app.camera.lut.LutCameraEffect(lutProcessor)
+
+                        // 將拍攝案例與特效組合成一個 UseCaseGroup
+                        val useCaseGroup = androidx.camera.core.UseCaseGroup.Builder()
+                            .addUseCase(preview)
+                            .addUseCase(imageCapture)
+                            .addEffect(lutEffect)
+                            .build()
+
+                        // 移除先前的綁定，並綁定完整包含濾鏡管線的 Lifecycle
                         cameraProvider.unbindAll()
                         cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            imageCapture
+                            useCaseGroup
                         )
                     } catch (exc: Exception) {
                         // 處理相機綁定失敗
