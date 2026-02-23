@@ -51,11 +51,11 @@ class MainActivity : ComponentActivity() {
 fun AppContent(hasPermission: Boolean) {
     MaterialTheme {
         Surface(color = Color.Black, modifier = Modifier.fillMaxSize()) {
-            Box(contentAlignment = Alignment.Center) {
-                if (hasPermission) {
-                    Text("LutCam Camera View (To be implemented)", color = Color.White)
-                } else {
-                    Text("Camera permission is required", color = Color.White)
+            if (hasPermission) {
+                com.lutcam.app.camera.CameraScreen()
+            } else {
+                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                    Text("需授予相機權限才能運作", color = Color.White)
                 }
             }
         }
