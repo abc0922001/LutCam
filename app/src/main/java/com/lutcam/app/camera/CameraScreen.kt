@@ -3,6 +3,9 @@ package com.lutcam.app.camera
 import android.annotation.SuppressLint
 import android.hardware.camera2.CaptureRequest
 import android.view.MotionEvent
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -31,7 +34,10 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @SuppressLint("ClickableViewAccessibility")
 @Composable
@@ -41,6 +47,24 @@ fun CameraScreen() {
 
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     val cameraExecutor = remember { ContextCompat.getMainExecutor(context) }
+
+    val coroutineScope = rememberCoroutineScope()
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let { 
+            coroutineScope.launch {
+                val lut = withContext(Dispatchers.IO) {
+                    com.lutcam.app.camera.lut.CubeLutParser.parse(context, it)
+                }
+                if (lut != null) {
+                    android.widget.Toast.makeText(context, "成功載入 LUT: 3D Size ${lut.size}", android.widget.Toast.LENGTH_SHORT).show()
+                } else {
+                    android.widget.Toast.makeText(context, "LUT 匯入失敗或格式錯誤", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     var previewView by remember { mutableStateOf<PreviewView?>(null) }
     var camera by remember { mutableStateOf<Camera?>(null) }
@@ -211,12 +235,30 @@ fun CameraScreen() {
                 .fillMaxWidth()
                 // 微弱的黑色漸層或半透明背景，突顯純淨感
                 .background(Color.Black.copy(alpha = 0.3f))
-                .padding(bottom = 48.dp, top = 24.dp),
-            contentAlignment = Alignment.Center
+                .padding(bottom = 48.dp, top = 24.dp)
         ) {
-            // 快門大按鈕
+            // 左側：LUT 檔案匯入按鈕
             Box(
                 modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 32.dp)
+                    .size(56.dp)
+                    .background(Color.DarkGray.copy(alpha = 0.5f), CircleShape)
+                    .clickable {
+                        launcher.launch(arrayOf("*/*")) // 開啟檔案總管，讓使用者選取 .cube
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                androidx.compose.material3.Text(
+                    text = "📂",
+                    fontSize = androidx.compose.ui.unit.TextUnit(24f, androidx.compose.ui.unit.TextUnitType.Sp)
+                )
+            }
+
+            // 置中：快門大按鈕
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
                     .size(80.dp)
                     .border(4.dp, Color.White, CircleShape)
                     .padding(4.dp) // 預留空間創造雙層圓環感
