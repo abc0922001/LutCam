@@ -49,6 +49,9 @@ fun CameraScreen() {
     val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
     val cameraExecutor = remember { ContextCompat.getMainExecutor(context) }
 
+    // LUT 渲染引擎 (在整個 Composable 生命週期中保持同一個實例)
+    val lutProcessor = remember { com.lutcam.app.camera.lut.LutSurfaceProcessor() }
+
     val coroutineScope = rememberCoroutineScope()
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -59,11 +62,12 @@ fun CameraScreen() {
                     com.lutcam.app.camera.lut.CubeLutParser.parse(context, it)
                 }
                 if (lut != null) {
-                    // [V1.0] LUT 檔案解析成功，但尚未實作即時套用 (需等 V2 OpenGL 管線)
+                    // 將解析好的 LUT 資料傳給 GPU 渲染引擎
+                    lutProcessor.setLut(lut)
                     android.widget.Toast.makeText(
                         context, 
-                        "LUT 解析成功 (${lut.size}³)，即時套用將於 V2 版本支援", 
-                        android.widget.Toast.LENGTH_LONG
+                        "LUT 已套用 (${lut.size}³)", 
+                        android.widget.Toast.LENGTH_SHORT
                     ).show()
                 } else {
                     android.widget.Toast.makeText(context, "LUT 匯入失敗或格式錯誤", android.widget.Toast.LENGTH_SHORT).show()
@@ -154,12 +158,20 @@ fun CameraScreen() {
                             imageCapture = imageCaptureBuilder.build()
 
                             try {
+                                // 建立 LUT 色彩效果，綁定到預覽和拍照
+                                val lutEffect = com.lutcam.app.camera.lut.LutCameraEffect(lutProcessor)
+
+                                val useCaseGroup = UseCaseGroup.Builder()
+                                    .addUseCase(preview)
+                                    .addUseCase(imageCapture!!)
+                                    .addEffect(lutEffect)
+                                    .build()
+
                                 cameraProvider.unbindAll()
                                 camera = cameraProvider.bindToLifecycle(
                                     lifecycleOwner,
                                     CameraSelector.DEFAULT_BACK_CAMERA,
-                                    preview,
-                                    imageCapture!!
+                                    useCaseGroup
                                 )
                                 
                                 // 獲取硬體支援的極限曝光補償範圍

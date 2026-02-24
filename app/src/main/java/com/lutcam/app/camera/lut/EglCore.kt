@@ -28,7 +28,7 @@ class EglCore {
             EGL14.EGL_GREEN_SIZE, 8,
             EGL14.EGL_BLUE_SIZE, 8,
             EGL14.EGL_ALPHA_SIZE, 8,
-            EGL14.EGL_RENDERABLE_TYPE, 0x00000040, // EGL_OPENGL_ES3_BIT_KHR 通常是 0x40
+            EGL14.EGL_RENDERABLE_TYPE, 0x00000040, // EGL_OPENGL_ES3_BIT_KHR
             EGL14.EGL_NONE
         )
 
@@ -58,9 +58,12 @@ class EglCore {
         EGL14.eglSwapBuffers(eglDisplay, surface)
     }
 
+    fun destroySurface(surface: EGLSurface) {
+        EGL14.eglDestroySurface(eglDisplay, surface)
+    }
+
     fun bindDefaultContext() {
-        val noSurface = EGL14.EGL_NO_SURFACE
-        EGL14.eglMakeCurrent(eglDisplay, noSurface, noSurface, eglContext)
+        EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, eglContext)
     }
 
     fun release() {
