@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 108 108">
+    <defs>
+        <!-- Background Dark Gradient -->
+        <linearGradient id="bg" x1="0" y1="0" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#0a0a0c" />
+            <stop offset="1" stop-color="#020202" />
+        </linearGradient>
+        
+        <!-- Golden Lens Ring -->
+        <radialGradient id="goldGrad" cx="54" cy="54" r="35" gradientUnits="userSpaceOnUse">
+            <stop offset="0.7" stop-color="#FFD700" />
+            <stop offset="1.0" stop-color="#B8860B" />
+        </radialGradient>
+
+        <!-- Glass Lens Internal Dark -->
+        <radialGradient id="glassGrad" cx="40" cy="40" r="50" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#333" />
+            <stop offset="0.5" stop-color="#1A1A1A" />
+            <stop offset="1" stop-color="#0D0D0D" />
+        </radialGradient>
+
+        <!-- Cube Faces Gradients -->
+        <linearGradient id="cubeTop" x1="40" y1="46" x2="68" y2="46" gradientUnits="userSpaceOnUse">
+            <stop offset="0.0" stop-color="#F4D03F"/>
+            <stop offset="1.0" stop-color="#F9E79F"/>
+        </linearGradient>
+        
+        <linearGradient id="cubeLeft" x1="40" y1="46" x2="54" y2="70" gradientUnits="userSpaceOnUse">
+            <stop offset="0.0" stop-color="#B7950B"/>
+            <stop offset="1.0" stop-color="#9A7D0A"/>
+        </linearGradient>
+        
+        <linearGradient id="cubeRight" x1="54" y1="46" x2="68" y2="62" gradientUnits="userSpaceOnUse">
+            <stop offset="0.0" stop-color="#D4AC0D"/>
+            <stop offset="1.0" stop-color="#F1C40F"/>
+        </linearGradient>
+    </defs>
+
+    <!-- Adaptive Background -->
+    <rect width="108" height="108" fill="url(#bg)" rx="24"/>
+
+    <!-- Lens Ring Shadow -->
+    <circle cx="54" cy="54" r="32" fill="#000000" opacity="0.5" filter="blur(2px)"/>
+
+    <!-- Outer Golden Lens Ring -->
+    <path d="M 54,22 C 71.67,22 86,36.33 86,54 C 86,71.67 71.67,86 54,86 C 36.33,86 22,71.67 22,54 C 22,36.33 36.33,22 54,22 Z M 54,25 C 37.98,25 25,37.98 25,54 C 25,70.02 37.98,83 54,83 C 70.02,83 83,70.02 83,54 C 83,37.98 70.02,25 54,25 Z" fill="url(#goldGrad)" />
+
+    <!-- Inner Dark Lens Glass -->
+    <path d="M 54,25 C 70.02,25 83,37.98 83,54 C 83,70.02 70.02,83 54,83 C 37.98,83 25,70.02 25,54 C 25,37.98 37.98,25 54,25 Z" fill="url(#glassGrad)" />
+
+    <!-- Subtle Optical Reflection (Glass Arc) -->
+    <path fill="#FFFFFF" fill-opacity="0.15" d="M 33,33 C 41,25 52,23 62,26 C 53,33 46,43 45,55 C 35,53 28,44 33,33 Z" />
+
+    <!-- LUT CUBE: Top Face -->
+    <path d="M 54,38 L 68,46 L 54,54 L 40,46 Z" fill="url(#cubeTop)"/>
+
+    <!-- LUT CUBE: Left Face -->
+    <path d="M 40,46 L 54,54 L 54,70 L 40,62 Z" fill="url(#cubeLeft)"/>
+
+    <!-- LUT CUBE: Right Face -->
+    <path d="M 54,54 L 68,46 L 68,62 L 54,70 Z" fill="url(#cubeRight)"/>
+
+    <!-- Center Aperture Dot -->
+    <circle cx="54" cy="54" r="2" fill="#1A1A1A" />
+
+</svg>
