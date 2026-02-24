@@ -16,20 +16,19 @@ import androidx.camera.core.SurfaceRequest
  * LutSurfaceProcessor：LutCam 的核心渲染引擎。
  *
  * 工作原理：
- * 1. 建立一個 OES 紋理 + SurfaceTexture 當作「攔截畫布」，交給 CameraX
+ * 1. 建立 OES 紋理 + SurfaceTexture 當作「攔截畫布」，交給 CameraX
  * 2. CameraX 把每一幀相機影像渲染到這個攔截畫布
- * 3. 當新的一幀到達時 (onFrameAvailable)，我們在 GPU 上跑 Fragment Shader：
- *    - 讀取 OES 紋理（相機原始畫面）
- *    - 用 RGB 值去查詢 3D LUT 紋理（色彩轉換表）
- *    - 把轉換後的色彩畫到所有 CameraX 的輸出 Surface (預覽 + 拍照)
- * 4. 整個過程完全在 GPU 硬體上運行，零 CPU 開銷，零延遲。
+ * 3. 每幀到達時 (onFrameAvailable)，在 GPU 上跑 Fragment Shader：
+ *    - 讀取 OES 紋理（原始影像）
+ *    - 用 RGB 值查詢 3D LUT 紋理（色彩轉換表）
+ *    - 畫到所有 CameraX 的輸出 Surface（預覽 + 拍照）
+ * 4. 完全在 GPU 硬體上運行，零 CPU 開銷。
  */
 class LutSurfaceProcessor : SurfaceProcessor {
     companion object {
         private const val TAG = "LutSurfaceProcessor"
     }
 
-    // 獨立的 GL 執行緒，避免卡住主 UI
     private val glThread = HandlerThread("LutRenderThread").apply { start() }
     private val glHandler = Handler(glThread.looper)
 
@@ -41,12 +40,13 @@ class LutSurfaceProcessor : SurfaceProcessor {
     private val texMatrix = FloatArray(16)
 
     // Shader Programs
-    private var lutProgram = 0          // 有 LUT 時使用
-    private var passthroughProgram = 0  // 無 LUT 時直接透傳
+    private var lutProgram = 0
+    private var passthroughProgram = 0
+    private var isGlInitialized = false
 
-    // 3D LUT 紋理
+    // 3D LUT
     private var lutTextureId = 0
-    @Volatile private var pendingLut: Lut3D? = null  // 來自 UI 線程的 LUT 資料
+    @Volatile private var pendingLut: Lut3D? = null
 
     // 輸出管理
     private data class OutputInfo(
@@ -57,18 +57,14 @@ class LutSurfaceProcessor : SurfaceProcessor {
     )
     private val outputs = mutableListOf<OutputInfo>()
 
-    // 輸入尺寸
-    private var inputWidth = 0
-    private var inputHeight = 0
-
     /**
-     * 從 UI 線程呼叫：設定要套用的 LUT 資料
-     * LUT 會在下一幀渲染時上傳到 GPU
+     * 從任何線程呼叫：設定要套用的 LUT 資料
      */
     fun setLut(lut: Lut3D?) {
-        pendingLut = lut
-        if (lut == null) {
-            // 清除 LUT：在 GL 線程上釋放紋理
+        if (lut != null) {
+            pendingLut = lut
+        } else {
+            pendingLut = null
             glHandler.post {
                 if (lutTextureId != 0) {
                     GLES30.glDeleteTextures(1, intArrayOf(lutTextureId), 0)
@@ -81,122 +77,145 @@ class LutSurfaceProcessor : SurfaceProcessor {
 
     override fun onInputSurface(request: SurfaceRequest) {
         glHandler.post {
-            // === 初始化 OpenGL 環境 ===
-            if (eglCore == null) {
-                eglCore = EglCore()
-            }
-            val core = eglCore ?: return@post
+            try {
+                initGl()
 
-            // 需要一個臨時的 PBuffer surface 來執行初始化 GL 指令
-            core.bindDefaultContext()
+                val inputWidth = request.resolution.width
+                val inputHeight = request.resolution.height
+                Log.d(TAG, "onInputSurface: ${inputWidth}x${inputHeight}")
 
-            // 建立 OES 紋理 (用來接收相機影像)
-            oesTextureId = LutGlUtils.createOesTexture()
-
-            // 編譯 Shader Programs
-            lutProgram = LutGlUtils.createProgram(LutGlUtils.VERTEX_SHADER, LutGlUtils.FRAGMENT_SHADER_LUT)
-            passthroughProgram = LutGlUtils.createProgram(LutGlUtils.VERTEX_SHADER, LutGlUtils.FRAGMENT_SHADER_PASSTHROUGH)
-
-            if (lutProgram == 0 || passthroughProgram == 0) {
-                Log.e(TAG, "Shader Program 建立失敗!")
-                request.willNotProvideSurface()
-                return@post
-            }
-
-            // 取得輸入影像尺寸
-            inputWidth = request.resolution.width
-            inputHeight = request.resolution.height
-
-            // 建立 SurfaceTexture (GPU 上的虛擬畫布)
-            surfaceTexture = SurfaceTexture(oesTextureId).apply {
-                setDefaultBufferSize(inputWidth, inputHeight)
-
-                // 當相機畫出新的一幀時觸發渲染
-                setOnFrameAvailableListener({ st ->
-                    glHandler.post { renderFrame(st) }
-                }, glHandler)
-            }
-
-            // 封裝成 Android Surface，交給 CameraX
-            inputSurface = Surface(surfaceTexture)
-
-            // 提供 Surface 給 CameraX (這是關鍵：CameraX 會把影像畫到這裡)
-            request.provideSurface(inputSurface!!, { it.run() }) { result ->
-                // Surface 被回收時清理資源
-                glHandler.post {
-                    inputSurface?.release()
-                    surfaceTexture?.release()
-                    inputSurface = null
-                    surfaceTexture = null
-                    Log.d(TAG, "Input surface 已釋放")
+                // 建立 SurfaceTexture (GPU 上的虛擬畫布接收相機影像)
+                surfaceTexture = SurfaceTexture(oesTextureId).apply {
+                    setDefaultBufferSize(inputWidth, inputHeight)
+                    setOnFrameAvailableListener({ renderFrame() }, glHandler)
                 }
-            }
 
-            Log.d(TAG, "Input surface 已建立: ${inputWidth}x${inputHeight}")
+                inputSurface = Surface(surfaceTexture)
+
+                // 將 Surface 交給 CameraX（CameraX 會把相機影像畫到這裡）
+                request.provideSurface(inputSurface!!, { it.run() }) { result ->
+                    Log.d(TAG, "Input surface result: ${result.resultCode}")
+                    glHandler.post {
+                        inputSurface?.release()
+                        surfaceTexture?.release()
+                        inputSurface = null
+                        surfaceTexture = null
+                    }
+                }
+                Log.d(TAG, "Input surface 已提供給 CameraX")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "onInputSurface 初始化失敗", e)
+                request.willNotProvideSurface()
+            }
         }
     }
 
     override fun onOutputSurface(surfaceOutput: SurfaceOutput) {
         glHandler.post {
-            val core = eglCore ?: return@post
-
-            // 取得 CameraX 提供的輸出 Surface，並包裝成 EGLSurface
-            val outputSurface = surfaceOutput.getSurface({ it.run() }) {
-                // 當 CameraX 要回收此輸出時
-                glHandler.post {
-                    val info = outputs.find { o -> o.surfaceOutput == surfaceOutput }
-                    if (info != null) {
-                        core.destroySurface(info.eglSurface)
-                        outputs.remove(info)
-                        Log.d(TAG, "Output surface 已釋放，剩餘 ${outputs.size} 個")
-                    }
-                    surfaceOutput.close()
-                }
+            val core = eglCore ?: run {
+                Log.e(TAG, "onOutputSurface: EGL 尚未初始化")
+                surfaceOutput.close()
+                return@post
             }
 
-            val eglSurface = core.createWindowSurface(outputSurface)
-            val size = surfaceOutput.size
-            outputs.add(OutputInfo(eglSurface, outputSurface, surfaceOutput, size))
-            Log.d(TAG, "Output surface 已註冊: ${size.width}x${size.height}，共 ${outputs.size} 個")
+            try {
+                val outSurface = surfaceOutput.getSurface({ it.run() }) {
+                    glHandler.post {
+                        val info = outputs.find { o -> o.surfaceOutput == surfaceOutput }
+                        if (info != null) {
+                            core.destroySurface(info.eglSurface)
+                            outputs.remove(info)
+                        }
+                        surfaceOutput.close()
+                        Log.d(TAG, "Output surface 已釋放，剩餘 ${outputs.size} 個")
+                    }
+                }
+
+                val eglSurface = core.createWindowSurface(outSurface)
+                val size = surfaceOutput.size
+                outputs.add(OutputInfo(eglSurface, outSurface, surfaceOutput, size))
+                Log.d(TAG, "Output surface 已註冊: ${size.width}x${size.height}，共 ${outputs.size} 個")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "onOutputSurface 失敗", e)
+                surfaceOutput.close()
+            }
         }
     }
 
     /**
-     * 核心渲染方法：每當相機產生新的一幀時被呼叫
+     * 初始化 OpenGL 環境（只執行一次）
      */
-    private fun renderFrame(st: SurfaceTexture) {
-        val core = eglCore ?: return
-        if (outputs.isEmpty()) return
+    private fun initGl() {
+        if (isGlInitialized) return
 
-        // 拉取最新的相機影像到 OES 紋理
+        // 建立 EGL 環境
+        val core = EglCore()
+        eglCore = core
+
+        // 使用 PBuffer 讓 GL context 生效（關鍵！無此步驟 GL 指令全部無效）
+        core.makePBufferCurrent()
+
+        // 建立 OES 紋理（接收相機影像）
+        oesTextureId = LutGlUtils.createOesTexture()
+        Log.d(TAG, "OES 紋理已建立: id=$oesTextureId")
+
+        // 編譯 Shader Programs
+        lutProgram = LutGlUtils.createProgram(LutGlUtils.VERTEX_SHADER, LutGlUtils.FRAGMENT_SHADER_LUT)
+        passthroughProgram = LutGlUtils.createProgram(LutGlUtils.VERTEX_SHADER, LutGlUtils.FRAGMENT_SHADER_PASSTHROUGH)
+
+        if (lutProgram == 0 || passthroughProgram == 0) {
+            Log.e(TAG, "Shader 編譯失敗! lutProgram=$lutProgram passthroughProgram=$passthroughProgram")
+            // 檢查 GL 錯誤
+            var err = GLES30.glGetError()
+            while (err != GLES30.GL_NO_ERROR) {
+                Log.e(TAG, "GL Error: 0x${Integer.toHexString(err)}")
+                err = GLES30.glGetError()
+            }
+        } else {
+            Log.d(TAG, "Shader 編譯成功: lutProgram=$lutProgram passthroughProgram=$passthroughProgram")
+        }
+
+        isGlInitialized = true
+        Log.d(TAG, "OpenGL 初始化完成")
+    }
+
+    /**
+     * 核心渲染：每當相機產生新的一幀時被呼叫
+     */
+    private fun renderFrame() {
+        val core = eglCore ?: return
+        val st = surfaceTexture ?: return
+
+        // 複製一份，避免 concurrent modification
+        val currentOutputs = synchronized(outputs) { outputs.toList() }
+        if (currentOutputs.isEmpty()) return
+
         try {
+            // 先切到 PBuffer 來更新紋理（需要 valid GL context）
+            core.makePBufferCurrent()
+
+            // 拉取最新的相機影像到 OES 紋理
             st.updateTexImage()
             st.getTransformMatrix(texMatrix)
-        } catch (e: Exception) {
-            Log.w(TAG, "updateTexImage 失敗: ${e.message}")
-            return
-        }
 
-        // 檢查是否有新的 LUT 等待上傳
-        val newLut = pendingLut
-        if (newLut != null) {
-            pendingLut = null
-            // 先刪除舊的 LUT 紋理
-            if (lutTextureId != 0) {
-                GLES30.glDeleteTextures(1, intArrayOf(lutTextureId), 0)
+            // 檢查是否有新的 LUT 等待上傳
+            val newLut = pendingLut
+            if (newLut != null) {
+                pendingLut = null
+                if (lutTextureId != 0) {
+                    GLES30.glDeleteTextures(1, intArrayOf(lutTextureId), 0)
+                }
+                lutTextureId = LutGlUtils.upload3DLutTexture(newLut)
+                Log.d(TAG, "LUT 已上傳 GPU: size=${newLut.size}, texId=$lutTextureId")
             }
-            // 上傳新的 3D LUT 紋理到 GPU
-            lutTextureId = LutGlUtils.upload3DLutTexture(newLut)
-            Log.d(TAG, "新的 LUT 已上傳至 GPU: size=${newLut.size}")
-        }
 
-        // 選擇使用哪個 Shader Program
-        val program = if (lutTextureId != 0) lutProgram else passthroughProgram
+            // 選擇 Shader
+            val program = if (lutTextureId != 0) lutProgram else passthroughProgram
 
-        // 對每個輸出 Surface 繪製一次 (通常是：預覽 + 拍照)
-        val outputsCopy = outputs.toList() // 複製避免 concurrent modification
-        for (output in outputsCopy) {
-            try {
+            // 繪製到每個輸出 Surface
+            for (output in currentOutputs) {
                 core.makeCurrent(output.eglSurface)
 
                 LutGlUtils.drawFrame(
@@ -209,38 +228,25 @@ class LutSurfaceProcessor : SurfaceProcessor {
                 )
 
                 core.swapBuffers(output.eglSurface)
-            } catch (e: Exception) {
-                Log.w(TAG, "渲染到 output 失敗: ${e.message}")
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "renderFrame 失敗", e)
         }
     }
 
-    /**
-     * 釋放所有 GPU 資源
-     */
     fun release() {
         glHandler.post {
             if (lutTextureId != 0) {
                 GLES30.glDeleteTextures(1, intArrayOf(lutTextureId), 0)
-                lutTextureId = 0
             }
             if (oesTextureId != 0) {
                 GLES30.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
-                oesTextureId = 0
             }
-            if (lutProgram != 0) {
-                GLES30.glDeleteProgram(lutProgram)
-                lutProgram = 0
-            }
-            if (passthroughProgram != 0) {
-                GLES30.glDeleteProgram(passthroughProgram)
-                passthroughProgram = 0
-            }
+            if (lutProgram != 0) GLES30.glDeleteProgram(lutProgram)
+            if (passthroughProgram != 0) GLES30.glDeleteProgram(passthroughProgram)
 
             inputSurface?.release()
             surfaceTexture?.release()
-            inputSurface = null
-            surfaceTexture = null
 
             val core = eglCore
             for (o in outputs) {
@@ -250,6 +256,7 @@ class LutSurfaceProcessor : SurfaceProcessor {
 
             core?.release()
             eglCore = null
+            isGlInitialized = false
 
             Log.d(TAG, "所有 GPU 資源已釋放")
         }
