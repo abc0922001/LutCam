@@ -134,20 +134,15 @@ fun CameraScreen() {
                         imageCapture = imageCaptureBuilder.build()
 
                         try {
-                            val lutProcessor = com.lutcam.app.camera.lut.LutSurfaceProcessor(cameraExecutor)
-                            val lutEffect = com.lutcam.app.camera.lut.LutCameraEffect(lutProcessor)
-
-                            val useCaseGroup = UseCaseGroup.Builder()
-                                .addUseCase(preview)
-                                .addUseCase(imageCapture!!)
-                                .addEffect(lutEffect)
-                                .build()
-
+                            // [V1.0] 直接綁定 Preview + ImageCapture，不經過 LUT Effect
+                            // LutSurfaceProcessor 目前為架構預留，呼叫 willNotProvideSurface() 會切斷整條管線
+                            // 等 V2.0 實作完整的 OpenGL pass-through 渲染後再啟用 LutCameraEffect
                             cameraProvider.unbindAll()
                             camera = cameraProvider.bindToLifecycle(
                                 lifecycleOwner,
                                 CameraSelector.DEFAULT_BACK_CAMERA,
-                                useCaseGroup
+                                preview,
+                                imageCapture!!
                             )
                             
                             // 獲取硬體支援的極限曝光補償範圍
