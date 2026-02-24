@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Camera body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40.5,36L43.36,32.64C43.93,31.95 44.78,31.5 45.72,31.5H62.28C63.22,31.5 64.07,31.95 64.64,32.64L67.5,36H73.5C75.71,36 77.5,37.79 77.5,40V68C77.5,70.21 75.71,72 73.5,72H34.5C32.29,72 30.5,70.21 30.5,68V40C30.5,37.79 32.29,36 34.5,36H40.5Z" />
+    <!-- Camera lens outer circle -->
+    <path
+        android:fillColor="#1A1A1A"
+        android:pathData="M54,44C48.48,44 44,48.48 44,54C44,59.52 48.48,64 54,64C59.52,64 64,59.52 64,54C64,48.48 59.52,44 54,44Z" />
+    <!-- Camera lens inner circle -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,48C50.69,48 48,50.69 48,54C48,57.31 50.69,60 54,60C57.31,60 60,57.31 60,54C60,50.69 57.31,48 54,48Z" />
+    <!-- Camera lens highlight -->
+    <path
+        android:fillColor="#1A1A1A"
+        android:pathData="M54,51C52.34,51 51,52.34 51,54C51,55.66 52.34,57 54,57C55.66,57 57,55.66 57,54C57,52.34 55.66,51 54,51Z" />
+    <!-- Flash indicator -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M36,39L37.5,39L37.5,41L36,41Z" />
+</vector>
