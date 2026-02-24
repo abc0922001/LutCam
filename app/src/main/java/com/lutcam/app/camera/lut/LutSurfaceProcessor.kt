@@ -50,18 +50,17 @@ class LutSurfaceProcessor(private val executor: Executor) : SurfaceProcessor {
             val core = eglCore ?: return@post
             
             // 將相機的輸出標的（螢幕預覽 或 儲存圖片）註冊進我們自製的管線，包裝成 GPU 能畫的 EGLSurface
+            // getSurface() 的第二個參數是 Consumer<SurfaceOutput.Event>，
+            // 當 CameraX 需要回收這個 Surface 時會觸發這個 callback，
+            // 我們在此進行 EGL 資源的清理，預防記憶體與顯示卡資源洩漏 (Memory Leak / VRAM Leak)
+            // （這點非常重要！不處理會導致 Android 相機元件崩潰）
             val eglSurface = core.createWindowSurface(surfaceOutput.getSurface(executor, Consumer { event -> 
-                // 處理事件，如畫面變更
-            }))
-            outputSurfaces[surfaceOutput] = eglSurface
-            
-            // 監聽畫布的回收，預防記憶體與顯示卡資源洩漏 (Memory Leak / VRAM Leak)
-            // （這點非常重要！這會導致 Android 相機元件崩潰）
-            surfaceOutput.closeFuture.addListener({
                 glHandler.post {
                     outputSurfaces.remove(surfaceOutput)
+                    surfaceOutput.close()
                 }
-            }, executor)
+            }))
+            outputSurfaces[surfaceOutput] = eglSurface
         }
     }
 }
