@@ -17,21 +17,22 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -58,7 +59,12 @@ fun CameraScreen() {
                     com.lutcam.app.camera.lut.CubeLutParser.parse(context, it)
                 }
                 if (lut != null) {
-                    android.widget.Toast.makeText(context, "成功載入 LUT: 3D Size ${lut.size}", android.widget.Toast.LENGTH_SHORT).show()
+                    // [V1.0] LUT 檔案解析成功，但尚未實作即時套用 (需等 V2 OpenGL 管線)
+                    android.widget.Toast.makeText(
+                        context, 
+                        "LUT 解析成功 (${lut.size}³)，即時套用將於 V2 版本支援", 
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
                 } else {
                     android.widget.Toast.makeText(context, "LUT 匯入失敗或格式錯誤", android.widget.Toast.LENGTH_SHORT).show()
                 }
@@ -85,150 +91,180 @@ fun CameraScreen() {
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // === 1. 相機底層預覽與觸控對接 ===
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                PreviewView(ctx).apply {
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                    previewView = this
-
-                    setOnTouchListener { view, event ->
-                        if (event.action == MotionEvent.ACTION_DOWN) {
-                            // 攔截觸控座標，送給 CameraX 進行對焦與測光
-                            val factory = this.meteringPointFactory
-                            val point = factory.createPoint(event.x, event.y)
-                            val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
-                                .build()
-                            
-                            camera?.cameraControl?.startFocusAndMetering(action)
-                            
-                            // 更新 UI 紀錄點
-                            focusPoint = Offset(event.x, event.y)
-                            isFocusUIVisible = true
-                            
-                            view.performClick()
-                            return@setOnTouchListener true
-                        }
-                        false
-                    }
-                }
-            },
-            update = {
-                if (camera == null) {
-                    cameraProviderFuture.addListener({
-                        val cameraProvider = cameraProviderFuture.get()
-
-                        val preview = Preview.Builder().build().also {
-                            it.setSurfaceProvider(previewView?.surfaceProvider)
-                        }
-
-                        val imageCaptureBuilder = ImageCapture.Builder()
-                            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-
-                        val ext = Camera2Interop.Extender(imageCaptureBuilder)
-                        ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
-                        ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
-                        ext.setCaptureRequestOption(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
-
-                        imageCapture = imageCaptureBuilder.build()
-
-                        try {
-                            // [V1.0] 直接綁定 Preview + ImageCapture，不經過 LUT Effect
-                            // LutSurfaceProcessor 目前為架構預留，呼叫 willNotProvideSurface() 會切斷整條管線
-                            // 等 V2.0 實作完整的 OpenGL pass-through 渲染後再啟用 LutCameraEffect
-                            cameraProvider.unbindAll()
-                            camera = cameraProvider.bindToLifecycle(
-                                lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview,
-                                imageCapture!!
-                            )
-                            
-                            // 獲取硬體支援的極限曝光補償範圍
-                            camera?.cameraInfo?.exposureState?.let { exposureState ->
-                                val range = exposureState.exposureCompensationRange
-                                exposureRange = range.lower.toFloat()..range.upper.toFloat()
-                                exposureIndex = exposureState.exposureCompensationIndex.toFloat()
-                            }
-
-                        } catch (exc: Exception) {
-                            exc.printStackTrace()
-                        }
-                    }, cameraExecutor)
-                }
-            }
-        )
-
-        // === 2. 極簡美學：對焦黃框與亮度滑桿覆蓋層 ===
-        AnimatedVisibility(
-            visible = isFocusUIVisible,
-            exit = fadeOut(animationSpec = tween(500)),
-            modifier = Modifier.fillMaxSize()
+        // === 1. 相機 4:3 預覽區 ===
+        // 將預覽限制在 3:4 比例 (橫行 3:4 = 直拍 4:3)，與實際拍出的照片一致
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(3f / 4f)
+                .align(Alignment.TopCenter)
         ) {
-            focusPoint?.let { point ->
-                val density = LocalDensity.current.density
-                Box(modifier = Modifier.fillMaxSize()) {
-                    // 對焦環 (外框)
-                    Canvas(
-                        modifier = Modifier
-                            .size(72.dp)
-                            .offset(
-                                x = (point.x / density).dp - 36.dp,
-                                y = (point.y / density).dp - 36.dp
-                            )
-                    ) {
-                        drawCircle(
-                            color = Color(0xFFFFCC00), // 沉穩黃金對焦色
-                            radius = size.minDimension / 2,
-                            style = Stroke(width = 2.dp.toPx())
-                        )
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PreviewView(ctx).apply {
+                        scaleType = PreviewView.ScaleType.FIT_CENTER
+                        previewView = this
+
+                        setOnTouchListener { view, event ->
+                            if (event.action == MotionEvent.ACTION_DOWN) {
+                                // 攔截觸控座標，送給 CameraX 進行對焦與測光
+                                val factory = this.meteringPointFactory
+                                val point = factory.createPoint(event.x, event.y)
+                                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                                    .build()
+                                
+                                camera?.cameraControl?.startFocusAndMetering(action)
+                                
+                                // 更新 UI 紀錄點
+                                focusPoint = Offset(event.x, event.y)
+                                isFocusUIVisible = true
+                                
+                                view.performClick()
+                                return@setOnTouchListener true
+                            }
+                            false
+                        }
                     }
-                    
-                    // 曝光補償滑桿 (直立顯示在對焦框右側)
-                    if (exposureRange.endInclusive > exposureRange.start) {
-                        Box(
-                            modifier = Modifier
-                                .offset(
-                                    x = (point.x / density).dp + 48.dp, // 放在右側 48dp 處
-                                    y = (point.y / density).dp - 60.dp  // 同等高度
+                },
+                update = {
+                    if (camera == null) {
+                        cameraProviderFuture.addListener({
+                            val cameraProvider = cameraProviderFuture.get()
+
+                            // 設定預覽為 4:3 比例
+                            val preview = Preview.Builder()
+                                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                                .build()
+                                .also {
+                                    it.setSurfaceProvider(previewView?.surfaceProvider)
+                                }
+
+                            // 設定拍照為 4:3 比例 + 最高品質
+                            val imageCaptureBuilder = ImageCapture.Builder()
+                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+
+                            // 關閉 Pixel 的過度後製：降噪、銳化、色調映射
+                            val ext = Camera2Interop.Extender(imageCaptureBuilder)
+                            ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
+                            ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
+                            ext.setCaptureRequestOption(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
+
+                            imageCapture = imageCaptureBuilder.build()
+
+                            try {
+                                cameraProvider.unbindAll()
+                                camera = cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    preview,
+                                    imageCapture!!
                                 )
-                                .width(32.dp)
-                                .height(120.dp)
+                                
+                                // 獲取硬體支援的極限曝光補償範圍
+                                camera?.cameraInfo?.exposureState?.let { exposureState ->
+                                    val range = exposureState.exposureCompensationRange
+                                    exposureRange = range.lower.toFloat()..range.upper.toFloat()
+                                    exposureIndex = exposureState.exposureCompensationIndex.toFloat()
+                                }
+
+                            } catch (exc: Exception) {
+                                exc.printStackTrace()
+                            }
+                        }, cameraExecutor)
+                    }
+                }
+            )
+
+            // === 2. 對焦黃框 + 垂直曝光控制 ===
+            AnimatedVisibility(
+                visible = isFocusUIVisible,
+                exit = fadeOut(animationSpec = tween(500)),
+                modifier = Modifier.fillMaxSize()
+            ) {
+                focusPoint?.let { point ->
+                    val density = LocalDensity.current.density
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        // 對焦環 (黃金外框)
+                        Canvas(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .offset(
+                                    x = (point.x / density).dp - 36.dp,
+                                    y = (point.y / density).dp - 36.dp
+                                )
                         ) {
-                            Slider(
-                                value = exposureIndex,
-                                onValueChange = { newVal ->
-                                    exposureIndex = newVal
-                                    camera?.cameraControl?.setExposureCompensationIndex(newVal.toInt())
-                                    isFocusUIVisible = true // 重置自動隱藏計時
-                                },
-                                valueRange = exposureRange,
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color(0xFFFFCC00),
-                                    activeTrackColor = Color(0xFFFFCC00),
-                                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                                ),
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .graphicsLayer {
-                                        // 原生的 Slider 是水平的，將他逆時針旋轉 90 度變成垂直，上推增加、下推變暗
-                                        rotationZ = -90f
-                                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 0.5f)
-                                    }
+                            drawCircle(
+                                color = Color(0xFFFFCC00),
+                                radius = size.minDimension / 2,
+                                style = Stroke(width = 2.dp.toPx())
                             )
+                        }
+                        
+                        // 垂直曝光補償控制 (仿 iPhone 太陽圖示 + 拖曳調整)
+                        if (exposureRange.endInclusive > exposureRange.start) {
+                            val controlHeight = 160.dp
+                            val controlHeightPx = with(LocalDensity.current) { controlHeight.toPx() }
+                            val totalRange = exposureRange.endInclusive - exposureRange.start
+
+                            Box(
+                                modifier = Modifier
+                                    .offset(
+                                        x = (point.x / density).dp + 52.dp,
+                                        y = (point.y / density).dp - 80.dp
+                                    )
+                                    .width(40.dp)
+                                    .height(controlHeight)
+                                    .pointerInput(exposureRange) {
+                                        detectVerticalDragGestures { _, dragAmount ->
+                                            // 向上拖曳增加曝光，向下減少
+                                            val sensitivity = totalRange / controlHeightPx
+                                            val newValue = (exposureIndex - dragAmount * sensitivity)
+                                                .coerceIn(exposureRange.start, exposureRange.endInclusive)
+                                            exposureIndex = newValue
+                                            camera?.cameraControl?.setExposureCompensationIndex(newValue.toInt())
+                                            isFocusUIVisible = true
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                // 軌道線
+                                Canvas(modifier = Modifier.fillMaxSize()) {
+                                    val centerX = size.width / 2
+                                    drawLine(
+                                        color = Color.White.copy(alpha = 0.3f),
+                                        start = Offset(centerX, 16.dp.toPx()),
+                                        end = Offset(centerX, size.height - 16.dp.toPx()),
+                                        strokeWidth = 2.dp.toPx()
+                                    )
+                                }
+                                
+                                // 太陽圖示 (表示亮度) 隨曝光值上下移動
+                                val normalizedPosition = if (totalRange > 0f) {
+                                    1f - (exposureIndex - exposureRange.start) / totalRange
+                                } else { 0.5f }
+                                val sunOffsetY = (normalizedPosition - 0.5f) * (controlHeightPx - with(LocalDensity.current) { 32.dp.toPx() })
+
+                                Text(
+                                    text = "☀",
+                                    fontSize = 22.sp,
+                                    color = Color(0xFFFFCC00),
+                                    modifier = Modifier
+                                        .offset(y = with(LocalDensity.current) { (sunOffsetY / density).dp })
+                                )
+                            }
                         }
                     }
                 }
             }
-        }
+        } // End of 4:3 preview area
 
         // === 3. 底部選單控制區 ===
         Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                // 微弱的黑色漸層或半透明背景，突顯純淨感
                 .background(Color.Black.copy(alpha = 0.3f))
                 .padding(bottom = 48.dp, top = 24.dp)
         ) {
@@ -240,13 +276,13 @@ fun CameraScreen() {
                     .size(56.dp)
                     .background(Color.DarkGray.copy(alpha = 0.5f), CircleShape)
                     .clickable {
-                        launcher.launch(arrayOf("*/*")) // 開啟檔案總管，讓使用者選取 .cube
+                        launcher.launch(arrayOf("*/*"))
                     },
                 contentAlignment = Alignment.Center
             ) {
-                androidx.compose.material3.Text(
+                Text(
                     text = "📂",
-                    fontSize = androidx.compose.ui.unit.TextUnit(24f, androidx.compose.ui.unit.TextUnitType.Sp)
+                    fontSize = 24.sp
                 )
             }
 
@@ -256,12 +292,11 @@ fun CameraScreen() {
                     .align(Alignment.Center)
                     .size(80.dp)
                     .border(4.dp, Color.White, CircleShape)
-                    .padding(4.dp) // 預留空間創造雙層圓環感
+                    .padding(4.dp)
                     .background(Color.White, CircleShape)
                     .clickable {
                         val captureOpt = imageCapture ?: return@clickable
                         
-                        // 建立存檔的檔名與屬性
                         val name = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
                             .format(System.currentTimeMillis())
                         
@@ -273,7 +308,6 @@ fun CameraScreen() {
                             }
                         }
 
-                        // 設定輸出至 MediaStore (相簿)
                         val outputOptions = ImageCapture.OutputFileOptions
                             .Builder(
                                 context.contentResolver,
@@ -282,7 +316,6 @@ fun CameraScreen() {
                             )
                             .build()
 
-                        // 觸發拍照
                         captureOpt.takePicture(
                             outputOptions,
                             cameraExecutor,
