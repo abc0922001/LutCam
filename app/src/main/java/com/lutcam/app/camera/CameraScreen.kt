@@ -40,6 +40,40 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * 讀取照片並根據 EXIF 資訊正確旋轉（解決拍照後照片方向錯誤的問題）
+ */
+private fun loadBitmapWithExif(context: android.content.Context, uri: Uri): android.graphics.Bitmap? {
+    val inputStream = context.contentResolver.openInputStream(uri) ?: return null
+    val original = android.graphics.BitmapFactory.decodeStream(inputStream)
+    inputStream.close()
+    if (original == null) return null
+
+    // 讀取 EXIF 方向資訊
+    val exifStream = context.contentResolver.openInputStream(uri) ?: return original
+    val exif = androidx.exifinterface.media.ExifInterface(exifStream)
+    exifStream.close()
+
+    val orientation = exif.getAttributeInt(
+        androidx.exifinterface.media.ExifInterface.TAG_ORIENTATION,
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_NORMAL
+    )
+
+    val matrix = android.graphics.Matrix()
+    when (orientation) {
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.preScale(-1f, 1f)
+        androidx.exifinterface.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.preScale(1f, -1f)
+        else -> return original // 不需要旋轉
+    }
+
+    val rotated = android.graphics.Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
+    if (rotated !== original) original.recycle()
+    return rotated
+}
+
 @SuppressLint("ClickableViewAccessibility")
 @Composable
 fun CameraScreen() {
@@ -89,6 +123,16 @@ fun CameraScreen() {
     var isFocusUIVisible by remember { mutableStateOf(false) }
     var exposureIndex by remember { mutableFloatStateOf(0f) }
     var exposureRange by remember { mutableStateOf(0f..0f) }
+
+    // 快門閃光動畫
+    var shutterFlash by remember { mutableStateOf(false) }
+
+    LaunchedEffect(shutterFlash) {
+        if (shutterFlash) {
+            delay(120)
+            shutterFlash = false
+        }
+    }
 
     LaunchedEffect(isFocusUIVisible, exposureIndex) {
         if (isFocusUIVisible) {
@@ -298,6 +342,14 @@ fun CameraScreen() {
                     }
                 }
             }
+            // 快門閃光效果（拍照瞬間的白色閃爍）
+            if (shutterFlash) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.White)
+                )
+            }
         } // End of 4:3 preview area
 
         // === 3. 底部選單控制區 ===
@@ -336,6 +388,9 @@ fun CameraScreen() {
                     .background(Color.White, CircleShape)
                     .clickable {
                         val captureOpt = imageCapture ?: return@clickable
+
+                        // 立即閃光回饋
+                        shutterFlash = true
                         
                         val name = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
                             .format(System.currentTimeMillis())
@@ -361,7 +416,37 @@ fun CameraScreen() {
                             cameraExecutor,
                             object : ImageCapture.OnImageSavedCallback {
                                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                                    android.widget.Toast.makeText(context, "照片已儲存至 LutCam 相簿", android.widget.Toast.LENGTH_SHORT).show()
+                                    val currentLut = lutProcessor.getCurrentLut()
+                                    val savedUri = output.savedUri
+                                    
+                                    if (currentLut != null && savedUri != null) {
+                                        coroutineScope.launch {
+                                            try {
+                                                withContext(Dispatchers.IO) {
+                                                    // 讀回照片（含 EXIF 旋轉修正）
+                                                    val originalBitmap = loadBitmapWithExif(context, savedUri)
+                                                    
+                                                    if (originalBitmap != null) {
+                                                        val processedBitmap = com.lutcam.app.camera.lut.LutBitmapProcessor.applyLut(originalBitmap, currentLut)
+                                                        originalBitmap.recycle()
+                                                        
+                                                        // 覆寫儲存（mode=wt 完全覆寫）
+                                                        val outputStream = context.contentResolver.openOutputStream(savedUri, "wt")
+                                                        if (outputStream != null) {
+                                                            processedBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, outputStream)
+                                                            outputStream.close()
+                                                        }
+                                                        processedBitmap.recycle()
+                                                    }
+                                                }
+                                                android.widget.Toast.makeText(context, "📸 照片已儲存（含 LUT）", android.widget.Toast.LENGTH_SHORT).show()
+                                            } catch (e: Exception) {
+                                                android.widget.Toast.makeText(context, "⚠️ LUT 處理失敗: ${e.message?.take(40)}", android.widget.Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    } else {
+                                        android.widget.Toast.makeText(context, "照片已儲存至 LutCam 相簿", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
                                 }
 
                                 override fun onError(exc: ImageCaptureException) {

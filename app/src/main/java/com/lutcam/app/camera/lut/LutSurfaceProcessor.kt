@@ -54,7 +54,11 @@ class LutSurfaceProcessor : SurfaceProcessor {
     private val outputs = mutableListOf<OutputInfo>()
     private val pendingOutputs = mutableListOf<SurfaceOutput>()
 
+    // 保存目前作用中的 LUT（供拍照後處理使用）
+    @Volatile private var currentLut: Lut3D? = null
+
     fun setLut(lut: Lut3D?) {
+        currentLut = lut
         if (lut != null) {
             pendingLut = lut
         } else {
@@ -68,6 +72,9 @@ class LutSurfaceProcessor : SurfaceProcessor {
             }
         }
     }
+
+    /** 取得目前套用中的 LUT（供拍照後軟體處理用） */
+    fun getCurrentLut(): Lut3D? = currentLut
 
     private fun initGl() {
         if (isGlInitialized) return
