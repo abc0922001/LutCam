@@ -52,6 +52,11 @@ fun CameraScreen() {
     // LUT 渲染引擎 (在整個 Composable 生命週期中保持同一個實例)
     val lutProcessor = remember { com.lutcam.app.camera.lut.LutSurfaceProcessor() }
 
+    // 當 Composable 被移除時，正確釋放 GPU 資源
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { lutProcessor.release() }
+    }
+
     val coroutineScope = rememberCoroutineScope()
     val launcher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -80,13 +85,11 @@ fun CameraScreen() {
     var camera by remember { mutableStateOf<Camera?>(null) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
 
-    // UI 互動狀態
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var isFocusUIVisible by remember { mutableStateOf(false) }
     var exposureIndex by remember { mutableFloatStateOf(0f) }
     var exposureRange by remember { mutableStateOf(0f..0f) }
 
-    // 觸控 3 秒後自動隱藏對焦與亮度介面
     LaunchedEffect(isFocusUIVisible, exposureIndex) {
         if (isFocusUIVisible) {
             delay(3000)
@@ -94,9 +97,87 @@ fun CameraScreen() {
         }
     }
 
+    // 用來強制重新綁定相機的 key — 增加 key 就會觸發重新綁定
+    var bindKey by remember { mutableIntStateOf(0) }
+    var hasBeenPaused by remember { mutableStateOf(false) }
+
+    // 監聽 Activity lifecycle：從背景回來時強制重新綁定整個相機管線
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_PAUSE) {
+                hasBeenPaused = true
+            } else if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && hasBeenPaused) {
+                hasBeenPaused = false
+                camera = null  // 觸發重新綁定
+                bindKey++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // 相機綁定函數（提取出來避免重複程式碼）
+    fun bindCamera(pv: PreviewView?) {
+        cameraProviderFuture.addListener({
+            val cameraProvider = cameraProviderFuture.get()
+
+            val preview = Preview.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .build()
+                .also { it.setSurfaceProvider(pv?.surfaceProvider) }
+
+            val cleanImageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
+                .build()
+
+            try {
+                cameraProvider.unbindAll()
+
+                var bound = false
+                try {
+                    val lutEffect = com.lutcam.app.camera.lut.LutCameraEffect(lutProcessor)
+                    val useCaseGroup = UseCaseGroup.Builder()
+                        .addUseCase(preview)
+                        .addUseCase(cleanImageCapture)
+                        .addEffect(lutEffect)
+                        .build()
+
+                    camera = cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        useCaseGroup
+                    )
+                    imageCapture = cleanImageCapture
+                    bound = true
+                } catch (effectExc: Exception) {
+                    android.widget.Toast.makeText(context, "⚠️ LUT引擎: ${effectExc.message?.take(60)}", android.widget.Toast.LENGTH_LONG).show()
+                    cameraProvider.unbindAll()
+                }
+
+                if (!bound) {
+                    imageCapture = cleanImageCapture
+                    camera = cameraProvider.bindToLifecycle(
+                        lifecycleOwner,
+                        CameraSelector.DEFAULT_BACK_CAMERA,
+                        preview,
+                        cleanImageCapture
+                    )
+                }
+
+                camera?.cameraInfo?.exposureState?.let { exposureState ->
+                    val range = exposureState.exposureCompensationRange
+                    exposureRange = range.lower.toFloat()..range.upper.toFloat()
+                    exposureIndex = exposureState.exposureCompensationIndex.toFloat()
+                }
+            } catch (exc: Exception) {
+                android.widget.Toast.makeText(context, "❌ 相機失敗: ${exc.message?.take(60)}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }, cameraExecutor)
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         // === 1. 相機 4:3 預覽區 ===
-        // 將預覽限制在 3:4 比例 (橫行 3:4 = 直拍 4:3)，與實際拍出的照片一致
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -112,7 +193,6 @@ fun CameraScreen() {
 
                         setOnTouchListener { view, event ->
                             if (event.action == MotionEvent.ACTION_DOWN) {
-                                // 攔截觸控座標，送給 CameraX 進行對焦與測光
                                 val factory = this.meteringPointFactory
                                 val point = factory.createPoint(event.x, event.y)
                                 val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
@@ -120,7 +200,6 @@ fun CameraScreen() {
                                 
                                 camera?.cameraControl?.startFocusAndMetering(action)
                                 
-                                // 更新 UI 紀錄點
                                 focusPoint = Offset(event.x, event.y)
                                 isFocusUIVisible = true
                                 
@@ -133,58 +212,7 @@ fun CameraScreen() {
                 },
                 update = {
                     if (camera == null) {
-                        cameraProviderFuture.addListener({
-                            val cameraProvider = cameraProviderFuture.get()
-
-                            // 設定預覽為 4:3 比例
-                            val preview = Preview.Builder()
-                                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-                                .build()
-                                .also {
-                                    it.setSurfaceProvider(previewView?.surfaceProvider)
-                                }
-
-                            // 設定拍照為 4:3 比例 + 最高品質
-                            val imageCaptureBuilder = ImageCapture.Builder()
-                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
-
-                            // 關閉 Pixel 的過度後製：降噪、銳化、色調映射
-                            val ext = Camera2Interop.Extender(imageCaptureBuilder)
-                            ext.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF)
-                            ext.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF)
-                            ext.setCaptureRequestOption(CaptureRequest.TONEMAP_MODE, CaptureRequest.TONEMAP_MODE_FAST)
-
-                            imageCapture = imageCaptureBuilder.build()
-
-                            try {
-                                // 建立 LUT 色彩效果，綁定到預覽和拍照
-                                val lutEffect = com.lutcam.app.camera.lut.LutCameraEffect(lutProcessor)
-
-                                val useCaseGroup = UseCaseGroup.Builder()
-                                    .addUseCase(preview)
-                                    .addUseCase(imageCapture!!)
-                                    .addEffect(lutEffect)
-                                    .build()
-
-                                cameraProvider.unbindAll()
-                                camera = cameraProvider.bindToLifecycle(
-                                    lifecycleOwner,
-                                    CameraSelector.DEFAULT_BACK_CAMERA,
-                                    useCaseGroup
-                                )
-                                
-                                // 獲取硬體支援的極限曝光補償範圍
-                                camera?.cameraInfo?.exposureState?.let { exposureState ->
-                                    val range = exposureState.exposureCompensationRange
-                                    exposureRange = range.lower.toFloat()..range.upper.toFloat()
-                                    exposureIndex = exposureState.exposureCompensationIndex.toFloat()
-                                }
-
-                            } catch (exc: Exception) {
-                                exc.printStackTrace()
-                            }
-                        }, cameraExecutor)
+                        bindCamera(previewView)
                     }
                 }
             )
